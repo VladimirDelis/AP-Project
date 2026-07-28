@@ -57,10 +57,18 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from utils.Dev_tcp_client_model import EMGTCPClient
 from utils.tcp_worker import TCPWorker
+from models.signal_processing import apply_mode
 
 VALID_MODES = ("original", "rms", "filtered")
 MIN_CHANNEL = 0
 MAX_CHANNEL = 31
+
+# TODO: hardcoded to match the real test server's known rate for now, and
+# duplicated in main.py's LivePlotView(sample_rate_hz=2000)/
+# AllChannelsPlotView(sample_rate_hz=2000) constructor calls. Once Person
+# A/C finalize a single shared Model, source this from there instead of
+# keeping three separate copies of the same number in sync by hand.
+DEFAULT_SAMPLE_RATE_HZ = 2000.0
 
 
 class LiveViewModel(QObject):
@@ -133,11 +141,10 @@ class LiveViewModel(QObject):
         self._selected_mode: str = "original"
         self._is_connected: bool = False
 
-        # Tracks which modes we've already printed a "processing function
-        # not available" warning for, so a missing models.signal_processing
-        # module doesn't spam the console once per incoming window (which
-        # can arrive many times a second) -- just once per mode selection.
-        self._processing_warned_modes: set = set()
+        # Passed to apply_mode() for the "filtered" mode's Butterworth
+        # band-pass (needs a sample rate to convert Hz cutoffs into
+        # normalized frequencies). See the module-level TODO above.
+        self._sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ
 
         # --- threading ---
         self._thread: Optional[QThread] = None
@@ -167,10 +174,8 @@ class LiveViewModel(QObject):
             # Already connected or connecting; ignore duplicate requests.
             return
 
-        # host/port are set here, at construction time -- EMGTCPClient.connect()
-        # takes no arguments, it just uses whatever host/port it was built with.
-        client = EMGTCPClient(host=host, port=port)
-        worker = TCPWorker(client)
+        client = EMGTCPClient()
+        worker = TCPWorker(client, host, port)
         thread = QThread(self)
         worker.moveToThread(thread)
 
@@ -316,96 +321,39 @@ class LiveViewModel(QObject):
     def _process_window(self, window: np.ndarray) -> np.ndarray:
         """
         Turn one raw (32, 18) window into whatever should actually be
-        displayed, based on the current mode. This is the single
+        displayed, based on the current mode, using the real
+        `models.signal_processing.apply_mode()`. This is the single
         integration point between "current mode selection" and "what the
         views draw" -- LivePlotView and AllChannelsPlotView never know or
         care whether they're looking at original, RMS, or filtered data;
         they just plot whatever `processed_data_ready` hands them.
 
-        GUESSED INTERFACE -- flagging for confirmation with Person A:
-        `models/signal_processing.py` doesn't exist in this codebase yet,
-        so the exact function names/signatures below are a guess based on
-        the task description, not confirmed:
+        Processes the FULL (32, 18) window in one call, rather than
+        extracting the currently-selected channel's row first: apply_mode
+        already loops per-channel internally for 2D input, so one call
+        here covers both AllChannelsPlotView (which needs all 32 channels
+        anyway) and LivePlotView (which extracts its own single row from
+        this same processed array in its existing `append_window()`, same
+        as it already does for raw data). Processing per-selected-channel
+        instead would mean calling apply_mode() a second time on the same
+        data for no benefit, and would only save work if channel changes
+        were expensive to react to -- they aren't.
 
-            from models.signal_processing import compute_rms
-            compute_rms(window: np.ndarray) -> np.ndarray
-
-            from models.signal_processing import apply_filter
-            apply_filter(window: np.ndarray) -> np.ndarray
-
-        Both are assumed to take one (32, 18) window and return one
-        (32, 18) array (same shape, just RMS'd/filtered in place of the
-        raw values) -- so that nothing downstream (the rolling buffers'
-        shape checks in particular) needs to change. If RMS is actually
-        meant to collapse each window down to one value per channel
-        (e.g. shape (32,) or (32, 1)) rather than keep 18 samples,
-        that's a plausible alternative reading of "RMS" and would need
-        the two call sites below (and the views' rolling buffers) updated
-        together -- confirm which one Person A implements.
-
-        If the import fails because the module doesn't exist yet (or
-        raises while running), this falls back to the raw window and
-        prints a one-time-per-mode console warning via
-        `_warn_processing_unavailable()`, rather than crashing or silently
-        showing nothing.
+        KNOWN LIMITATION (confirmed against the real module, not a guess):
+        `apply_mode(..., 'filtered', ...)` internally requires at least
+        ~27 samples for `scipy.signal.filtfilt` to run (it falls back to
+        returning the input unchanged if there are fewer). Each window
+        here is only 18 samples, so calling apply_mode() per-window like
+        this means "Filtered" mode will currently look IDENTICAL to
+        "Original" -- confirmed by testing apply_mode() directly against
+        an (32, 18) array. RMS is unaffected by this (its window clamps to
+        whatever length it's given), so RMS does visibly change the
+        signal; Filtered does not, yet. Fixing this needs feeding
+        apply_mode a longer accumulated history per channel rather than
+        one 18-sample window at a time -- out of scope for this change,
+        but worth flagging before assuming "Filtered" is fully working.
         """
-        mode = self._selected_mode
-
-        if mode == "original":
-            return window
-
-        if mode == "rms":
-            try:
-                from models.signal_processing import compute_rms
-            except ImportError:
-                self._warn_processing_unavailable("rms", "models.signal_processing.compute_rms")
-                return window
-            try:
-                return compute_rms(window)
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
-                self._warn_processing_unavailable("rms", f"compute_rms() (raised {exc!r})")
-                return window
-
-        if mode == "filtered":
-            try:
-                from models.signal_processing import apply_filter
-            except ImportError:
-                self._warn_processing_unavailable("filtered", "models.signal_processing.apply_filter")
-                return window
-            try:
-                return apply_filter(window)
-            except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
-                self._warn_processing_unavailable("filtered", f"apply_filter() (raised {exc!r})")
-                return window
-
-        # set_mode() validates against VALID_MODES, so this shouldn't be
-        # reachable -- but fail safe (show raw data) rather than silently
-        # drop a window if it somehow ever is.
-        return window
-
-    def _warn_processing_unavailable(self, mode_name: str, missing_symbol: str) -> None:
-        """
-        Print a console warning the first time a mode's processing turns
-        out to be unavailable (module missing, or the call itself raised),
-        then stay quiet about it for the rest of this mode selection.
-
-        Windows can arrive many times a second, and the underlying reason
-        a mode isn't working isn't going to change from one window to the
-        next -- printing this on every single window would flood the
-        console without adding information, which risks the warning
-        getting lost/ignored rather than noticed. Once per mode keeps it
-        loud enough to be impossible to miss during integration testing,
-        without becoming noise.
-        """
-        if mode_name in self._processing_warned_modes:
-            return
-        self._processing_warned_modes.add(mode_name)
-        print(
-            f"WARNING: '{mode_name}' mode is selected, but {missing_symbol} "
-            "is not available (module not found, not merged in yet, or it "
-            "raised an error). Falling back to unprocessed/original data "
-            "for now."
-        )
+        return apply_mode(window, self._selected_mode, self._sample_rate_hz)
 
     def _on_connection_state_changed(self, connected: bool) -> None:
         """Track connection state locally, then forward it on to the View."""

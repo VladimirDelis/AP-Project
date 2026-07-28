@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QStackedWidget,
     QPushButton,
 )
@@ -35,6 +36,8 @@ from viewmodels.live_viewmodel import LiveViewModel
 from views.connection_widget import ConnectionWidget
 from views.live_plot_view import LivePlotView
 from views.all_channels_plot_view import AllChannelsPlotView
+from views.channel_selector_widget import ChannelSelectorWidget
+from views.mode_selector_widget import ModeSelectorWidget
 
 
 class MainWindow(QMainWindow):
@@ -73,6 +76,22 @@ class MainWindow(QMainWindow):
         self.live_view_model.processed_data_ready.connect(self.live_plot_view.append_window)
         self.live_view_model.processed_data_ready.connect(self.all_channels_view.append_window)
 
+        # Channel selection: the ViewModel is the single source of truth
+        # (see LiveViewModel.channel_changed's docstring) -- the selector
+        # widget only ever calls set_channel(); it never touches
+        # live_plot_view directly. AllChannelsPlotView is intentionally
+        # NOT connected to this signal at all: it always shows all 32
+        # channels regardless of what's selected here.
+        channel_selector = ChannelSelectorWidget(self.live_view_model)
+        self.live_view_model.channel_changed.connect(self.live_plot_view.set_channel)
+        self.live_plot_view.set_channel(self.live_view_model.selected_channel)  # initial sync
+
+        # Mode selection: same single-source-of-truth pattern. Mode
+        # affects BOTH views, since both listen to processed_data_ready
+        # (which is already mode-aware -- see LiveViewModel._process_window),
+        # not to a per-view mode setting of their own.
+        mode_selector = ModeSelectorWidget(self.live_view_model)
+
         # Stack holds both plots; only one is shown at a time.
         self.plot_stack = QStackedWidget()
         self.plot_stack.addWidget(self.live_plot_view)     # index 0: single channel
@@ -82,10 +101,18 @@ class MainWindow(QMainWindow):
         self.toggle_all_channels_btn.setCheckable(True)
         self.toggle_all_channels_btn.toggled.connect(self._on_toggle_all_channels)
 
+        controls_row = QWidget()
+        controls_layout = QHBoxLayout(controls_row)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addWidget(channel_selector)
+        controls_layout.addWidget(mode_selector)
+        controls_layout.addWidget(self.toggle_all_channels_btn)
+        controls_layout.addStretch(1)
+
         self.live_view = QWidget()
         live_layout = QVBoxLayout(self.live_view)
         live_layout.addWidget(connection_widget)
-        live_layout.addWidget(self.toggle_all_channels_btn)
+        live_layout.addWidget(controls_row)
         live_layout.addWidget(self.plot_stack)
 
         self.tabs = QTabWidget()
