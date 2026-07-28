@@ -28,9 +28,8 @@ from PySide6.QtWidgets import (
 from viewmodels.offline_viewmodel import OfflineViewModel
 from views.offline_view import OfflineView
 
-# --- Swap this import out once A delivers the real Model ---
-from models.fake_model_stub import FakeSignalModel as SignalModel
-# --------------------------------------------------------------------------
+from models.tcp_client_model import TcpClientModel
+from models.model_adapter import SharedSessionModel
 
 from viewmodels.live_viewmodel import LiveViewModel
 from views.connection_widget import ConnectionWidget
@@ -47,29 +46,44 @@ class MainWindow(QMainWindow):
         self.resize(1000, 650)
 
         # ------------------------------------------------------------
-        # TEMPORARY / NOT YET INTEGRATED:
-        # This is a stand-in "fake" Model used only for the Offline
-        # side for now. The Live side below currently builds its OWN
-        # separate LiveViewModel (with its own TCPWorker/thread) rather
-        # than sharing this Model instance. That means, right now, the
-        # Offline view is NOT actually seeing data from the Live view's
-        # real connection. This needs to be resolved once we agree
-        # with Person A on a single shared Model object/interface.
+        # ONE shared session, seen by both ViewModels.
+        #
+        # TcpClientModel and signal_processing.py are Person A's real
+        # models -- both treated as read-only here (see
+        # models/model_adapter.py's own docstring for why). TcpClientModel
+        # itself doesn't match either ViewModel's expected interface
+        # exactly (different signal names, different connect() signature,
+        # method-based vs. attribute-based data access), so
+        # SharedSessionModel bridges those mismatches without touching
+        # Person A's file. Constructing ONE TcpClientModel + ONE
+        # SharedSessionModel here, then handing that single adapter
+        # instance to BOTH ViewModels below, is what makes the Offline
+        # view actually see the Live connection's real data now --
+        # previously each side had its own separate, disconnected model.
         # ------------------------------------------------------------
-        self.model = SignalModel()
+        # sampling_rate=2000 confirmed by running the actual test server and
+        # reading its "Sampling rate: 2000 Hz" startup output. MUST be
+        # re-confirmed if the grading server uses a different recording.pkl
+        # file with a different sample rate.
+        self.model = TcpClientModel(sampling_rate=2000)
+        self.shared_model = SharedSessionModel(self.model)
 
-        self.offline_view_model = OfflineViewModel(self.model)
+        self.offline_view_model = OfflineViewModel(self.shared_model)
         self.offline_view = OfflineView(self.offline_view_model)
 
         # --- Live side (Person B) ---
         # LivePlotView/AllChannelsPlotView are plain Views: they take
         # config values (sample_rate_hz etc.), not a ViewModel, and are
         # wired up via explicit signal connections below.
-        self.live_view_model = LiveViewModel()  # builds its own worker/thread
+        self.live_view_model = LiveViewModel(self.shared_model)
 
         connection_widget = ConnectionWidget(self.live_view_model)
-        self.live_plot_view = LivePlotView(sample_rate_hz=2000)
-        self.all_channels_view = AllChannelsPlotView(sample_rate_hz=2000)
+        # sample_rate_hz now comes from the shared model's real
+        # sampling_rate (TcpClientModel's actual attribute) instead of a
+        # hardcoded 2000 duplicated in three places -- resolves the TODO
+        # that used to be in LiveViewModel about this exact duplication.
+        self.live_plot_view = LivePlotView(sample_rate_hz=self.model.sampling_rate)
+        self.all_channels_view = AllChannelsPlotView(sample_rate_hz=self.model.sampling_rate)
 
         # Both views keep receiving data regardless of which is
         # currently visible, so switching back never shows stale data.
@@ -122,11 +136,10 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
 
-        # NOTE: status/connection signals are wired to live_view_model,
-        # since that's what actually owns the real TCP connection right
-        # now. self.model (the offline fake stub) has its own separate
-        # signals that aren't reflecting live connection state — this
-        # will need to be unified once there's one shared Model.
+        # Both ViewModels now observe the SAME shared_model, so this is no
+        # longer "only reflecting the Live side" the way it used to when
+        # self.model was a separate, disconnected fake stub -- there's
+        # only one real connection now, and both tabs see it.
         self.live_view_model.status_updated.connect(self._on_status_updated)
         self.live_view_model.connection_state_changed.connect(self._on_connection_state_changed)
 

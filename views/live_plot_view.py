@@ -40,7 +40,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from views._plot_common import (
     N_CHANNELS,
-    N_SAMPLES_PER_WINDOW,
     RollingBuffer,
     resolve_sample_rate,
 )
@@ -202,7 +201,7 @@ class LivePlotView(QWidget):
 
     def append_window(self, window: np.ndarray) -> None:
         """
-        Feed one new (32, 18) window into the rolling buffer.
+        Feed one new (32, n_samples) chunk into the rolling buffer.
 
         Only the row for the currently selected channel is kept; this is
         the "internally selects the row for the current channel" behavior
@@ -210,13 +209,19 @@ class LivePlotView(QWidget):
         a redraw -- it only updates the buffer. The redraw timer picks up
         the new data on its own schedule.
 
+        n_samples is NOT assumed fixed: the real TcpClientModel polls on a
+        timer and emits however many samples arrived since the last poll
+        (possibly several packets concatenated), so this only validates
+        the channel count, not a specific sample count per call.
+
         Parameters
         ----------
         window : np.ndarray
-            Shape (32, 18), dtype float64.
+            Shape (32, n_samples), dtype float64. n_samples may vary
+            between calls.
         """
-        if window.shape != (N_CHANNELS, N_SAMPLES_PER_WINDOW):
-            raise ValueError(f"Expected window shape (32, 18), got {window.shape}")
+        if window.shape[0] != N_CHANNELS:
+            raise ValueError(f"Expected {N_CHANNELS} channels, got shape {window.shape}")
 
         channel_samples = window[self._channel]
         self._buffer.append(channel_samples)

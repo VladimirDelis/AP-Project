@@ -38,17 +38,30 @@ Two buffers are maintained from the same incoming data:
 
 Pure, GUI-agnostic functions operating on `(channels, samples)` arrays — usable identically for live (on `rolling_buffer`) and offline (on `full_buffer`) data:
 
-- `bandpass_filter(data, sampling_rate, low_cut=20, high_cut=450, order=4)`: zero-phase Butterworth bandpass (`scipy.signal.butter` + `filtfilt`). Cutoffs (20-450 Hz) are standard EMG values. Raises `ValueError` on invalid parameters or insufficient samples to filter, for the ViewModel to catch and display.
-- `compute_rms(data, sampling_rate, window_ms=100)`: sliding-window RMS via vectorized convolution (100 ms window). Vectorized (rather than a per-sample loop) so it's fast enough to recompute on every live-view tick.
+- `compute_rms(signal, window=50)`: moving RMS via vectorized convolution over a 50-sample window. Vectorized (rather than a per-sample loop) so it's fast enough to recompute on every live-view tick.
+- `compute_filtered(signal, sample_rate_hz, low_hz=1.0, high_hz=40.0, order=4)`: zero-phase 4th-order Butterworth band-pass filter (`scipy.signal.butter` + `filtfilt`), 1-40 Hz. Falls back to returning the input unchanged if there are too few samples for stable filtering, rather than raising.
+- `apply_mode(signal, mode, sample_rate_hz)`: dispatch helper selecting between `"original"`, `"rms"`, and `"filtered"` — the single integration point both ViewModels call into.
 
 ### Error handling
 
-The model never crashes on expected failure modes — it catches `OSError` (bad port, connection reset, server closing the connection) around all socket operations and reports them through `status_updated`. `bandpass_filter`/`compute_rms` raise `ValueError` with a clear message for invalid parameters or too little data, for the ViewModel to catch similarly.
+The model never crashes on expected failure modes — it catches `OSError` (bad port, connection reset, server closing the connection) around all socket operations and reports them through `status_updated`. `compute_filtered` returns the input unchanged (rather than raising) when there isn't enough data to filter stably.
 
 ## ViewModel layer (`viewmodels/`)
 
-TODO
+Sits between the Views and the shared Model, holding all UI-facing state and business logic. Views never touch the Model directly — only ViewModel methods/signals.
+
+- **`LiveViewModel`** (`viewmodels/live_viewmodel.py`): wraps the shared session model (constructor-injected), forwards its `status_updated`/`connection_state_changed` signals, and owns the live view's "current channel" and "current mode" selections. Every incoming raw chunk is run through `apply_mode()` and re-emitted as `processed_data_ready` — the only signal the plot Views should connect to.
+- **`OfflineViewModel`** (`viewmodels/offline_viewmodel.py`): pull-based. Owns the offline view's own independent "current channel"/"current mode" selections, pulls the full recorded session from the shared model on demand, and applies `apply_mode()` before handing data to the View. Emits `data_changed` whenever the View should re-read and redraw (channel/mode change, or new data arriving while still connected).
+
+Both ViewModels are constructed around the *same* shared model instance (built once in `main.py`), so the Live and Offline tabs always reflect one underlying session.
 
 ## View layer (`views/`)
 
-TODO
+Plain Qt widgets — no TCP or signal-processing logic. Each either binds to a ViewModel (calling its methods, reacting to its signals) or, for the plot widgets, takes plain config values and is wired up externally.
+
+- **`ConnectionWidget`**: host/port entry and connect/disconnect buttons, bound to `LiveViewModel`.
+- **`ChannelSelectorWidget`** / **`ModeSelectorWidget`**: small controls that call `set_channel()`/`set_mode()` on `LiveViewModel` and reflect its `channel_changed`/`mode_changed` signals back into the widget — the ViewModel remains the single source of truth for both selections.
+- **`LivePlotView`**: scrolling single-channel plot (VisPy), fed via `append_window()` and switched via `set_channel()`.
+- **`AllChannelsPlotView`**: scrolling overview of all 32 channels stacked vertically (VisPy), fed via `append_window()`; independent of the channel selector — it always shows every channel.
+- **`OfflineView`**: Matplotlib plot of the full recorded session, bound to `OfflineViewModel`; channel/mode spinboxes call into the ViewModel, and the plot redraws on `data_changed`.
+- **`_plot_common.py`**: shared rolling-buffer implementations and sample-rate resolution helper used by both plot widgets.

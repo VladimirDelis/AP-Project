@@ -12,7 +12,7 @@ SAMPLES_PER_PACKET = 18
 # server on startup as "Sampling rate: {rate} Hz". It is NOT sent over the
 # socket, so it has to be hardcoded here to match. Getting this wrong will
 # throw off the time axis, RMS, and filter cutoffs.
-SAMPLING_RATE_HZ = 250.0
+SAMPLING_RATE_HZ = 2000.0
 
 # How many seconds of history the live rolling-window plot keeps.
 ROLLING_WINDOW_SECONDS = 10.0

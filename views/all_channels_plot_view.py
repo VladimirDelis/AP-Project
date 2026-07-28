@@ -35,7 +35,6 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from views._plot_common import (
     N_CHANNELS,
-    N_SAMPLES_PER_WINDOW,
     MultiChannelRollingBuffer,
     resolve_sample_rate,
 )
@@ -56,6 +55,18 @@ OFFSET_SHRINK_ALPHA = 0.3
 # Used only to build the scene before any real data has arrived (in
 # auto-spacing mode); overwritten by the first tick that has data.
 _PLACEHOLDER_OFFSET_SPACING = 1.0
+
+# Extra clearance added beyond the OUTERMOST channels' (Ch 0 at the
+# bottom, Ch N_CHANNELS-1 at the top) own baselines, so their traces have
+# room to render fully without being clipped by the camera's outer edge.
+# This is deliberately independent of offset_spacing (which only governs
+# the gap BETWEEN neighboring channels, and is never changed by this) --
+# it only pads the two outer edges of the overall y-range. See
+# `_compute_outer_y_range()`. A fixed constant, in the same data-space
+# units as offset_spacing -- NOT computed from the current buffer's
+# min/max or recalculated at runtime. Tune this directly if Ch 0/Ch 31
+# still feel cramped or too loose for your actual signal's amplitude.
+EDGE_PADDING = 400.0
 
 # Rough floor on legible vertical pixels per channel row, given
 # LABEL_FONT_SIZE below -- used to pick a sensible default widget height so
@@ -173,8 +184,8 @@ class AllChannelsPlotView(QWidget):
         # text labels drawn at each trace's own baseline.
         view = grid.add_view(row=0, col=0)
         view.camera = scene.PanZoomCamera()
-        y_max = (N_CHANNELS - 1) * self._offset_spacing + self._offset_spacing
-        view.camera.set_range(x=(0, self._window_seconds), y=(-self._offset_spacing, y_max))
+        y_min, y_max = self._compute_outer_y_range()
+        view.camera.set_range(x=(0, self._window_seconds), y=(y_min, y_max))
         view.camera.interactive = False  # same reasoning as LivePlotView
         self._view = view
 
@@ -233,18 +244,22 @@ class AllChannelsPlotView(QWidget):
 
     def append_window(self, window: np.ndarray) -> None:
         """
-        Feed one new (32, 18) window into the shared rolling buffer.
+        Feed one new (32, n_samples) chunk into the shared rolling buffer.
 
         Unlike LivePlotView, every row is kept -- this view always shows
         all channels and has no notion of "current channel" at all.
 
+        n_samples is NOT assumed fixed -- see LivePlotView.append_window()
+        for why (the real TcpClientModel emits variable-length chunks).
+
         Parameters
         ----------
         window : np.ndarray
-            Shape (32, 18), dtype float64.
+            Shape (32, n_samples), dtype float64. n_samples may vary
+            between calls.
         """
-        if window.shape != (N_CHANNELS, N_SAMPLES_PER_WINDOW):
-            raise ValueError(f"Expected window shape (32, 18), got {window.shape}")
+        if window.shape[0] != N_CHANNELS:
+            raise ValueError(f"Expected {N_CHANNELS} channels, got shape {window.shape}")
 
         self._buffer.append(window)
         self._total_samples_appended += window.shape[1]
@@ -268,18 +283,30 @@ class AllChannelsPlotView(QWidget):
 
         Uses each channel's peak-to-peak range over the visible window,
         summarized with the median (not max) across channels so one
-        unusually noisy channel doesn't blow the spacing out for the other
-        31. Follows the same "expand immediately, shrink only
-        occasionally/smoothed" policy as LivePlotView's y-axis fix, and for
-        the same reason: a spacing that's late to widen means channels
-        visibly collide first and separate afterward, which is worse than
-        occasionally being a bit more spaced out than strictly necessary.
+        unusually noisy/large-amplitude channel doesn't blow the spacing
+        out for the other 31 -- a max-based version was tried, but with a
+        real outlier channel present it made every other channel's trace
+        look visually flat by comparison, since the shared spacing became
+        much larger than their actual amplitude. Follows the same "expand
+        immediately, shrink only occasionally/smoothed" policy as
+        LivePlotView's y-axis fix, for the same reason: a spacing that's
+        late to widen means channels visibly collide first and separate
+        afterward, which is worse than occasionally being a bit more
+        spaced out than strictly necessary.
 
-        Note: this only fixes trace-vs-trace overlap. It does NOT change
-        how many actual screen pixels each channel gets (that's fixed by
-        the widget's height / N_CHANNELS, regardless of what data-space
-        spacing is chosen) -- the separate label-overlap problem is fixed
-        by `MIN_PX_PER_CHANNEL`/`LABEL_FONT_SIZE` above instead.
+        KNOWN LIMITATION (intentionally deferred): because this sizes
+        spacing from the median, a genuine outlier channel (e.g. one
+        channel swinging much wider than the rest) can still spill past
+        its own lane into a neighbor's. That's a separate, later fix --
+        this method is not the place `Ch 0 clipped at the canvas edge` is
+        addressed either; see `_compute_outer_y_range()` for that.
+
+        Note: this only affects trace-vs-trace overlap. It does NOT
+        change how many actual screen pixels each channel gets (that's
+        fixed by the widget's height / N_CHANNELS, regardless of what
+        data-space spacing is chosen) -- the separate label-overlap
+        problem is fixed by `MIN_PX_PER_CHANNEL`/`LABEL_FONT_SIZE` above
+        instead.
         """
         peak_to_peak = np.ptp(channel_rows, axis=1)  # shape (32,)
         typical_amplitude = float(np.median(peak_to_peak))
@@ -298,6 +325,35 @@ class AllChannelsPlotView(QWidget):
         if self._offset_tick_count % OFFSET_ADAPT_EVERY_N_TICKS == 0:
             self._offset_spacing += OFFSET_SHRINK_ALPHA * (target_spacing - self._offset_spacing)
             self._offset_spacing = max(self._offset_spacing, MIN_OFFSET_SPACING)
+
+    def _compute_outer_y_range(self) -> tuple:
+        """
+        Compute the overall camera y-range's two OUTER edges.
+
+        The gap BETWEEN neighboring channels is entirely offset_spacing's
+        job (see `_update_offset_spacing()`) and is untouched here. This
+        method only decides how far below Ch 0's baseline (0) and above
+        Ch N_CHANNELS-1's baseline the camera's outer bounds extend, which
+        is a different problem from a channel spilling into a *neighbor's*
+        lane: the outer edge is the actual canvas/camera boundary, so
+        anything past it is completely clipped (invisible), not just
+        visually overlapping another trace.
+
+        Padding is a fixed constant (EDGE_PADDING) added below Ch 0's
+        baseline and above Ch N_CHANNELS-1's baseline -- NOT computed from
+        the current buffer's min/max or any other runtime data. An earlier
+        version of this method scaled the padding to each outer channel's
+        own observed excursion, but that made the margin feel too tight by
+        default (Ch 0 sitting right at the canvas edge with no visible
+        breathing room) when the buffer's recent min/max happened to be
+        small. A flat constant is simpler to reason about and to tune
+        directly if it turns out too tight or too loose for the real
+        signal's amplitude -- see EDGE_PADDING's definition near the top
+        of this file.
+        """
+        y_min = 0.0 - EDGE_PADDING
+        y_max = (N_CHANNELS - 1) * self._offset_spacing + EDGE_PADDING
+        return y_min, y_max
 
     def _on_redraw_tick(self) -> None:
         """
@@ -346,8 +402,9 @@ class AllChannelsPlotView(QWidget):
         baselines = np.arange(N_CHANNELS) * self._offset_spacing
         self._labels.pos = np.column_stack((np.full(N_CHANNELS, x_min), baselines))
 
+        y_min, y_max = self._compute_outer_y_range()
         self._view.camera.set_range(
             x=(x_min, max(x_min + self._window_seconds, now)),
-            y=(-self._offset_spacing, (N_CHANNELS - 1) * self._offset_spacing + self._offset_spacing),
+            y=(y_min, y_max),
             margin=0,
         )
