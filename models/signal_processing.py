@@ -1,63 +1,83 @@
+"""
+Signal processing model.
+
+Pure numpy/scipy signal transforms, shared by both the live VisPy view and
+the offline Matplotlib view. No GUI code (MVVM: Model layer).
+
+Parameters used (document these in the README too):
+    RMS window:      50 samples (moving RMS)
+    Filter:          4th-order Butterworth band-pass, 1-40 Hz
+                     (typical EMG/EEG-like signal band; adjust to your
+                     actual signal source and sample rate)
+"""
+from __future__ import annotations
+
 import numpy as np
-from scipy import signal
+from scipy.signal import butter, filtfilt
+
+RMS_WINDOW = 50
+FILTER_ORDER = 4
+FILTER_LOW_HZ = 1.0
+FILTER_HIGH_HZ = 40.0
 
 
-def bandpass_filter(data, sampling_rate, low_cut=20, high_cut=450, order=4):
+def compute_rms(signal: np.ndarray, window: int = RMS_WINDOW) -> np.ndarray:
+    """Moving RMS along the last axis. signal shape: (..., n_samples)."""
+    if signal.shape[-1] == 0:
+        return signal.copy()
+    window = max(1, min(window, signal.shape[-1]))
+    squared = signal ** 2
+    kernel = np.ones(window) / window
+    if signal.ndim == 1:
+        mean_sq = np.convolve(squared, kernel, mode="same")
+        return np.sqrt(mean_sq)
+    # 2D: (n_channels, n_samples) -> apply per channel
+    out = np.empty_like(signal, dtype=float)
+    for ch in range(signal.shape[0]):
+        out[ch] = np.sqrt(np.convolve(squared[ch], kernel, mode="same"))
+    return out
+
+
+def compute_filtered(
+    signal: np.ndarray,
+    sample_rate_hz: float,
+    low_hz: float = FILTER_LOW_HZ,
+    high_hz: float = FILTER_HIGH_HZ,
+    order: int = FILTER_ORDER,
+) -> np.ndarray:
+    """Zero-phase Butterworth band-pass filter along the last axis.
+
+    Falls back to returning the input unchanged if there are too few
+    samples for stable filtering (filtfilt needs > ~3x filter order).
     """
-    Zero-phase Butterworth bandpass filter, applied independently per channel.
+    n_samples = signal.shape[-1]
+    min_len = 3 * (order * 2 + 1)  # filtfilt padding requirement, roughly
+    if n_samples < min_len:
+        return signal.copy()
 
-    data: np.ndarray, shape (channels, samples)
-    Raises ValueError if the parameters or the input are invalid, so the
-    caller (ViewModel) can catch it and show a status message instead of
-    crashing.
-    """
-    nyquist = sampling_rate / 2
+    nyquist = sample_rate_hz / 2.0
+    low = max(low_hz / nyquist, 1e-4)
+    high = min(high_hz / nyquist, 0.999)
+    if low >= high:
+        return signal.copy()
 
-    if low_cut <= 0:
-        raise ValueError("Low cutoff frequency must be greater than 0 Hz.")
-    if high_cut >= nyquist:
-        raise ValueError(
-            f"High cutoff frequency ({high_cut} Hz) exceeds the Nyquist frequency ({nyquist} Hz)."
-        )
-    if low_cut >= high_cut:
-        raise ValueError("Low cutoff frequency must be smaller than the high cutoff frequency.")
+    b, a = butter(order, [low, high], btype="band")
 
-    b, a = signal.butter(order, [low_cut / nyquist, high_cut / nyquist], btype="band")
+    if signal.ndim == 1:
+        return filtfilt(b, a, signal)
 
-    # filtfilt needs a minimum number of samples relative to the filter order,
-    # otherwise it raises a cryptic error. Fail clearly instead.
-    min_length = 3 * (max(len(a), len(b)) - 1)
-    if data.shape[1] <= min_length:
-        raise ValueError(
-            f"Not enough samples ({data.shape[1]}) to filter; need more than {min_length}."
-        )
-
-    filtered = np.zeros_like(data)
-    for channel in range(data.shape[0]):
-        filtered[channel, :] = signal.filtfilt(b, a, data[channel, :])
-
-    return filtered
+    out = np.empty_like(signal, dtype=float)
+    for ch in range(signal.shape[0]):
+        out[ch] = filtfilt(b, a, signal[ch])
+    return out
 
 
-def compute_rms(data, sampling_rate, window_ms=100):
-    """
-    Sliding-window RMS per channel, same shape as input.
-
-    Vectorized with convolution (instead of a per-sample Python loop) so it
-    stays fast enough to recompute on every live-view update tick.
-
-    Caveat: np.convolve(..., mode="same") implicitly zero-pads past the
-    edges of the array. For the *offline* full recording this only affects
-    the very first/last few samples. For the *live* rolling buffer, it means
-    the most recent half-window of samples (the newest arrivals) will read
-    as an underestimate until more data arrives to fill the window - this is
-    expected, not a bug.
-    """
-    window_size = max(1, int((window_ms / 1000) * sampling_rate))
-    kernel = np.ones(window_size) / window_size
-
-    mean_squared = np.array(
-        [np.convolve(channel**2, kernel, mode="same") for channel in data]
-    )
-
-    return np.sqrt(mean_squared)
+def apply_mode(signal: np.ndarray, mode: str, sample_rate_hz: float) -> np.ndarray:
+    """Dispatch helper: mode in {'original', 'rms', 'filtered'}."""
+    if mode == "original":
+        return signal
+    if mode == "rms":
+        return compute_rms(signal)
+    if mode == "filtered":
+        return compute_filtered(signal, sample_rate_hz)
+    raise ValueError(f"Unknown signal mode: {mode!r}")

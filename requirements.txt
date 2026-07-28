@@ -1,3 +1,7 @@
+vispy
+matplotlib
+scipy
+pyside6
 numpy
 scipy
 PySide6
