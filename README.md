@@ -2,11 +2,66 @@
 
 TCP signal visualization application for the Applied Programming 2026 final project.
 
+## Team
+
+**Group:** 26
+
+**Team members and responsibilities:**
+
+- Mahir Rafi Kasim, 23797021, af76aqul — **Person A:** TCP client and signal processing (Model layer) — `models/tcp_client_model.py`, `models/signal_processing.py`
+- Vladimir Delis, 23882224, qo21topo — **Person B:** live view, connection controls, and VisPy visualization — `views/connection_widget.py`, `views/live_plot_view.py`, `views/all_channels_plot_view.py`, `views/channel_selector_widget.py`, `views/mode_selector_widget.py`
+- Hamza Ali, 23656618, te30tozo — **Person C:** main window and offline Matplotlib view — `main.py`, `views/offline_view.py`, `viewmodels/offline_viewmodel.py`
+
+The `SharedSessionModel` adapter (`models/model_adapter.py`), which bridges `TcpClientModel` to both ViewModels' expected interfaces, was a collaborative effort by the whole team during integration rather than any one person's task.
+
+*This README was written and reviewed collaboratively by the team, with formatting/drafting assistance from Claude.*
+
 ## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
+
+## Usage
+
+### Running the application
+
+From the project root, with dependencies installed:
+
+```bash
+python main.py
+```
+
+This opens the main window with two tabs: **Live** and **Offline Inspection**.
+
+### Connecting to the TCP server
+
+1. Start the course-provided TCP server (Exercise 5) first.
+2. In the **Live** tab, enter the server's **Host** (default `127.0.0.1`) and **Port** (default `12345`) in the connection controls at the top.
+3. Click **Connect**. The status label and the window's status bar show the result — e.g. "Connected to ..." on success, or a clear error message if the server isn't running or the port is wrong.
+4. Streaming starts automatically as soon as the connection succeeds — there's no separate "start" step.
+5. Click **Disconnect** at any time to stop streaming and close the connection. The app automatically switches to the **Offline Inspection** tab so you can immediately inspect what was just recorded.
+
+### Using the live plot
+
+- While connected, the single-channel plot (VisPy) scrolls in real time, showing the last few seconds of the currently selected channel.
+- Use the **Channel** spinbox to pick which of the 32 channels (0-31) is displayed.
+- Use the **Mode** dropdown to switch between **Original**, **RMS**, and **Filtered** views of the signal (see "Signal processing" below for the parameters used).
+- Click **Plot All Channels** to switch to an overview showing all 32 channels at once, stacked with a small vertical offset so they stay readable; click **Show Single Channel** to switch back. Both plots keep receiving data in the background regardless of which one is visible, so switching never shows stale data.
+
+### Opening the offline plot
+
+- Switch to the **Offline Inspection** tab at any time (the app also switches to it automatically when you disconnect).
+- It shows the full recorded session — everything received since connecting — not just the rolling live window.
+- If no data has been recorded yet, it shows a "No data recorded yet." message instead of a blank or broken plot.
+- The offline plot does not update live — use the **Refresh** button, or change the channel/mode, to redraw it with the latest data.
+
+### Switching channels and signal modes
+
+Both the Live and Offline views have independent channel and mode selections, so you can watch one channel live while inspecting a different one offline:
+
+- **Live tab:** the **Channel** spinbox and **Mode** dropdown above the plot.
+- **Offline tab:** the **Channel** spinbox and **Mode** dropdown above the offline plot — changing either immediately redraws the plot.
 
 ## Model layer (`models/`)
 

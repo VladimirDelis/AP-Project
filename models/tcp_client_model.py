@@ -155,6 +155,12 @@ class TcpClientModel(QObject):
         return np.concatenate(packets, axis=1)
 
     def _append_to_buffers(self, new_chunk):
+        """
+        Append one new (channels, new_samples) chunk to both buffers:
+        full_buffer grows unbounded (the whole session), while
+        rolling_buffer is trimmed back down to rolling_window_samples
+        whenever it grows past that -- keeping only the newest window.
+        """
         self.total_samples_received += new_chunk.shape[1]
 
         self.full_buffer = np.concatenate((self.full_buffer, new_chunk), axis=1)

@@ -172,17 +172,19 @@ class LiveViewModel(QObject):
         Parameters
         ----------
         index : int
-            Channel index, expected to be in range [0, 31].
-
-        Raises
-        ------
-        ValueError
-            If index is outside the valid channel range.
+            Channel index, expected to be in range [0, 31]. An out-of-range
+            index is rejected gracefully (a status message is emitted and
+            the call is a no-op) rather than raising -- matches
+            OfflineViewModel.set_channel()'s pattern, since both selector
+            widgets already hard-bound their input to this range and an
+            exception here would have nowhere safe to be caught.
         """
         if not (MIN_CHANNEL <= index <= MAX_CHANNEL):
-            raise ValueError(
-                f"Channel index must be between {MIN_CHANNEL} and {MAX_CHANNEL}, got {index}"
+            self.status_updated.emit(
+                f"Ignored invalid channel index {index}: must be between "
+                f"{MIN_CHANNEL} and {MAX_CHANNEL}."
             )
+            return
         if index == self._selected_channel:
             return
         self._selected_channel = index
@@ -200,15 +202,17 @@ class LiveViewModel(QObject):
         Parameters
         ----------
         mode : str
-            One of "original", "rms", "filtered".
-
-        Raises
-        ------
-        ValueError
-            If mode is not one of the supported values.
+            One of "original", "rms", "filtered". An unrecognized mode is
+            rejected gracefully (a status message is emitted and the call
+            is a no-op) rather than raising -- matches
+            OfflineViewModel.set_mode()'s pattern, since the selector
+            widget already only ever offers these three values.
         """
         if mode not in VALID_MODES:
-            raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
+            self.status_updated.emit(
+                f"Ignored invalid mode {mode!r}: must be one of {VALID_MODES}."
+            )
+            return
         if mode == self._selected_mode:
             return
         self._selected_mode = mode
