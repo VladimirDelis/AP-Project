@@ -59,14 +59,49 @@ _PLACEHOLDER_OFFSET_SPACING = 1.0
 # Extra clearance added beyond the OUTERMOST channels' (Ch 0 at the
 # bottom, Ch N_CHANNELS-1 at the top) own baselines, so their traces have
 # room to render fully without being clipped by the camera's outer edge.
-# This is deliberately independent of offset_spacing (which only governs
-# the gap BETWEEN neighboring channels, and is never changed by this) --
-# it only pads the two outer edges of the overall y-range. See
-# `_compute_outer_y_range()`. A fixed constant, in the same data-space
-# units as offset_spacing -- NOT computed from the current buffer's
-# min/max or recalculated at runtime. Tune this directly if Ch 0/Ch 31
-# still feel cramped or too loose for your actual signal's amplitude.
-EDGE_PADDING = 400.0
+# See `_compute_outer_y_range()`.
+#
+# EDGE_PADDING_FRACTION * offset_spacing -- deliberately a PROPORTION of
+# offset_spacing, not a flat data-space constant. offset_spacing is itself
+# auto-scaled from the real signal's own amplitude (see
+# `_update_offset_spacing()`), and confirmed via live debug logging
+# against the real server to range from ~929 up into the 5900s (and still
+# climbing) within a single session. The widget's PIXEL height, however,
+# is fixed regardless of that (see MIN_PX_PER_CHANNEL below) -- so a flat
+# padding constant becomes a shrinking, eventually sub-pixel fraction of
+# the rendered height as offset_spacing grows, which is exactly why a
+# flat EDGE_PADDING had to keep growing indefinitely to stay visible, and
+# why doubling it produced no visible change once it was already
+# negligible. Expressing it as a fraction of offset_spacing instead keeps
+# it a roughly CONSTANT share of the rendered pixel height, regardless of
+# how large the real signal's amplitude turns out to be.
+#
+# EDGE_PADDING_FLOOR covers the opposite extreme: a flat/near-silent
+# signal where offset_spacing collapses toward MIN_OFFSET_SPACING, where
+# a pure fraction would round to ~nothing -- the floor guarantees the
+# outer channels still get reasonable breathing room even with
+# essentially no signal amplitude to scale from.
+#
+# This covers trace excursion only -- see LABEL_EDGE_PADDING_FRACTION
+# below for the outer channels' text labels, a separate concern.
+EDGE_PADDING_FRACTION = 0.35
+EDGE_PADDING_FLOOR = 600.0
+
+# Same reasoning as EDGE_PADDING_FRACTION, but reserved specifically for
+# the outermost channels' own "Ch 0"/"Ch 31" TEXT LABELS' vertical extent,
+# on top of EDGE_PADDING_FRACTION's trace-excursion margin.
+#
+# The "Ch N" labels are scene.Text glyphs rendered at a fixed PIXEL size
+# (LABEL_FONT_SIZE), anchored at each channel's baseline (anchor_y=
+# "center") -- their vertical extent never scales with the data-space
+# y-range the way a trace's amplitude does, so this needs its own margin
+# separate from EDGE_PADDING_FRACTION's trace-only one. It has to scale
+# with offset_spacing for the exact same reason EDGE_PADDING does (a flat
+# value is equally negligible against a large real offset_spacing) -- just
+# with a smaller fraction, since a label glyph's own height is much
+# smaller than a full trace's realistic peak-to-peak swing.
+LABEL_EDGE_PADDING_FRACTION = 0.20
+LABEL_EDGE_PADDING_FLOOR = 350.0
 
 # Rough floor on legible vertical pixels per channel row, given
 # LABEL_FONT_SIZE below -- used to pick a sensible default widget height so
@@ -339,20 +374,38 @@ class AllChannelsPlotView(QWidget):
         anything past it is completely clipped (invisible), not just
         visually overlapping another trace.
 
-        Padding is a fixed constant (EDGE_PADDING) added below Ch 0's
-        baseline and above Ch N_CHANNELS-1's baseline -- NOT computed from
-        the current buffer's min/max or any other runtime data. An earlier
-        version of this method scaled the padding to each outer channel's
-        own observed excursion, but that made the margin feel too tight by
-        default (Ch 0 sitting right at the canvas edge with no visible
-        breathing room) when the buffer's recent min/max happened to be
-        small. A flat constant is simpler to reason about and to tune
-        directly if it turns out too tight or too loose for the real
-        signal's amplitude -- see EDGE_PADDING's definition near the top
-        of this file.
+        Padding is computed as a PROPORTION of offset_spacing (plus a
+        floor for near-zero offset_spacing) rather than a flat constant --
+        see EDGE_PADDING_FRACTION/LABEL_EDGE_PADDING_FRACTION's
+        definitions near the top of this file for why: the widget's pixel
+        height is fixed (see MIN_PX_PER_CHANNEL) regardless of how large
+        offset_spacing gets, so a flat padding value becomes an
+        increasingly negligible, eventually sub-pixel fraction of that
+        fixed height once offset_spacing grows large against a
+        real-amplitude signal -- confirmed via live debug logging showing
+        offset_spacing climbing from ~929 into the 5900s+ within one
+        session while a flat combined padding of 650 stayed put at well
+        under 1% of the total range. A proportional value keeps padding a
+        roughly CONSTANT share of the rendered height instead. (An even
+        earlier version scaled padding from each outer channel's own noisy
+        observed min/max directly, which felt too tight during quiet
+        moments -- this is different: it scales from offset_spacing, which
+        is itself already smoothed and safety-margined in
+        `_update_offset_spacing()`, so it doesn't inherit that noisiness.)
+
+        The two paddings are added together (both applied identically to
+        y_min and y_max, so this stays symmetric): EDGE_PADDING_FRACTION
+        covers the outer channels' own trace excursion,
+        LABEL_EDGE_PADDING_FRACTION separately covers their "Ch N" text
+        labels' own vertical extent -- see that constant's docstring for
+        why it had to be a second, distinct margin rather than folded into
+        the trace one.
         """
-        y_min = 0.0 - EDGE_PADDING
-        y_max = (N_CHANNELS - 1) * self._offset_spacing + EDGE_PADDING
+        edge_padding = max(self._offset_spacing * EDGE_PADDING_FRACTION, EDGE_PADDING_FLOOR)
+        label_edge_padding = max(self._offset_spacing * LABEL_EDGE_PADDING_FRACTION, LABEL_EDGE_PADDING_FLOOR)
+        total_padding = edge_padding + label_edge_padding
+        y_min = 0.0 - total_padding
+        y_max = (N_CHANNELS - 1) * self._offset_spacing + total_padding
         return y_min, y_max
 
     def _on_redraw_tick(self) -> None:

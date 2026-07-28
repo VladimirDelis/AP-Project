@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QStackedWidget,
     QPushButton,
+    QScrollArea,
 )
 
 from viewmodels.offline_viewmodel import OfflineViewModel
@@ -106,10 +107,25 @@ class MainWindow(QMainWindow):
         # not to a per-view mode setting of their own.
         mode_selector = ModeSelectorWidget(self.live_view_model)
 
+        # AllChannelsPlotView enforces a minimum height for all 32 channels
+        # (N_CHANNELS * MIN_PX_PER_CHANNEL + 60, ~636px) so its labels never
+        # overlap -- but that can exceed the available window/screen height.
+        # Wrapping it in a QScrollArea lets the widget render at its full,
+        # unsqueezed natural size while the scroll area itself stays within
+        # whatever space is actually available, showing a vertical scrollbar
+        # instead of clipping any channels off the top/bottom.
+        self.all_channels_scroll = QScrollArea()
+        self.all_channels_scroll.setWidget(self.all_channels_view)
+        self.all_channels_scroll.setWidgetResizable(True)
+        # Enough viewport height to show roughly half the channels at once
+        # without excessive scrolling, while still leaving room to shrink on
+        # small screens instead of forcing the full ~636px minimum.
+        self.all_channels_scroll.setMinimumHeight(320)
+
         # Stack holds both plots; only one is shown at a time.
         self.plot_stack = QStackedWidget()
-        self.plot_stack.addWidget(self.live_plot_view)     # index 0: single channel
-        self.plot_stack.addWidget(self.all_channels_view)  # index 1: all channels
+        self.plot_stack.addWidget(self.live_plot_view)          # index 0: single channel
+        self.plot_stack.addWidget(self.all_channels_scroll)     # index 1: all channels (scrollable)
 
         self.toggle_all_channels_btn = QPushButton("Plot All Channels")
         self.toggle_all_channels_btn.setCheckable(True)
@@ -145,7 +161,7 @@ class MainWindow(QMainWindow):
 
     def _on_toggle_all_channels(self, checked: bool) -> None:
         if checked:
-            self.plot_stack.setCurrentWidget(self.all_channels_view)
+            self.plot_stack.setCurrentWidget(self.all_channels_scroll)
             self.toggle_all_channels_btn.setText("Show Single Channel")
         else:
             self.plot_stack.setCurrentWidget(self.live_plot_view)
