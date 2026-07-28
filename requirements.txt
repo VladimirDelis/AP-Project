@@ -1,2 +1,6 @@
+vispy
+matplotlib
+scipy
+pyside6
 numpy
 
